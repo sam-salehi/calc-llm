@@ -1,0 +1,141 @@
+import pandas as pd
+import numpy as np
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModel
+from transformers import BitsAndBytesConfig
+import torch
+from google import genai 
+from prompts import evaluation_context, question_context
+import re
+
+# umath dataset for evaluation 
+df = pd.read_parquet("hf://datasets/toloka/u-math/data/test-00000-of-00001.parquet")
+num_rows = df.shape[0]
+google_api_key = "AIzaSyATAjRpWR6Fog4gnPszen3LvpO_ny_ABSY" # TODO: move to env file.
+
+device = "cuda"
+if device == "cuda":
+    torch.cuda.empty_cache()
+
+
+torch.set_float32_matmul_precision("high")
+
+
+class Gemini:
+    def __init__(self):
+        self.client  = genai.Client(api_key=google_api_key)
+    
+    def __call__(self,prompt):
+        response = self.client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents = [prompt]
+        )
+        return response.text.strip() 
+
+
+
+class LocalModel:
+    def __init__(self, model_name):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            offload_folder="./offload",
+        ).to(device)
+
+    def __call__(self, prompt):
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(device)
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=150,
+            temperature=0.9,
+            top_p =0.9,
+            repetition_penalty=1.2,
+            do_sample=True 
+        )
+
+        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return text
+
+
+
+
+# model = Gemini(gemini_key)
+# evaluator = Gemini(gemini_key, "gemini-1.5-pro")
+#
+
+
+def generate_question_prompt(question):
+    context = question_context
+    res = f"<context>  {context} </context> Answer the following: <Question> {question} </Question>"
+    return res
+
+
+def generate_response_prompt(question, model_response, golden_response):
+    context = evaluation_context
+    res = f"<context>{context}</context> <Question>{question}</Question> \n <GoldAnswer> {golden_response} </GoldAnswer> <ModelAnswer> {model_response} </ModelAnswer>"
+    return res
+
+
+def evaluate_response(evaluator, question, response, golden_response):
+    prompt = generate_response_prompt(question, response, golden_response)
+    response = evaluator(prompt)
+    return response
+
+
+def extract_eval(text):
+    pattern = r"<Evaluation>(.*?)</Evaluation>"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        return match.group(1).strip()  # return content inside tags.
+    return None
+
+
+def extract_reasoning(text):
+    pattern = r"<Reasoning>(.*?)</Reasoning>"
+    match = re.search(pattern, text, re.DOTALL)
+    if match:
+        return match.group(1)
+    return None
+
+
+df["model_response"] = None
+df["evaluation_reason"] = None
+df["eval"] = np.nan
+
+evaluator = Gemini()
+model = LocalModel("google/gemma-2b-it")
+
+num_rows = 100 
+for i in range(num_rows):
+
+    question = df.loc[i, "problem_statement"]
+    golden_response = df.loc[i, "golden_answer"]
+
+    question_prompt = generate_question_prompt(question)
+    answer = model(question_prompt)
+    print("Making evaluaton ")
+    evaluation = evaluate_response(evaluator, question, answer, golden_response)
+    print("Evaluation made")
+
+
+    eval = extract_eval(evaluation)
+    reasoning = extract_reasoning(evaluation)
+
+    df.loc[i, "model_response"] = answer
+    df.loc[i, "evaluaton_reason"] = reasoning
+    df.loc[i, "eval"] = eval == "Correct"
+
+    print(f"{i + 1}/{num_rows} response was {eval}.")
+    # except Exception as e:
+    #     print("Faced error")
+    #     print(e)
+    #     break
+
+
+df = df.dropna()
+
+
+df.to_csv("gemma_2b_it_val.csv", index=False)
+

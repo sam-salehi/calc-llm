@@ -1,116 +1,192 @@
 import pandas as pd
+import numpy as np
 import time
-from google import genai
-from openai import OpenAI
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModel
+from transformers import BitsAndBytesConfig
 import torch
-from google import genai
-import requests
+from google import genai 
 from prompts import evaluation_context, question_context
 import re
+import os 
+from dotenv import load_dotenv
 
-
+# umath dataset for evaluation 
 df = pd.read_parquet("hf://datasets/toloka/u-math/data/test-00000-of-00001.parquet")
-num_rows = df.shape[0]
 
 
-class Model:
-    def __init__(self, model_name="tiiuae/falcon-rw-1b"):
+
+load_dotenv()
+google_api_key = os.getenv("google_api_key")
+
+device = "cuda"
+torch.cuda.empty_cache()
+
+
+torch.set_float32_matmul_precision("high")
+
+
+class Gemini:
+    def __init__(self):
+        self.client  = genai.Client(api_key=google_api_key)
+    
+    def __call__(self,prompt):
+        response = self.client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents = [prompt]
+        )
+        return response.text.strip() 
+
+
+
+class LocalModel:
+    def __init__(self, model_name):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            offload_folder="/content/offload",
-            offload_state_dict=True,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            offload_folder="./offload",
         )
 
-    def __call__(self, prompt):
-        inputs = self.tokenizer(prompt, return_tensors="pt")
-        outputs = self.model.generate(**inputs, max_length=300, do_sample=False)
 
-        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return text
+    def __call__(self,prompts):
+        encoded = self.tokenizer(prompts,padding=True,return_tensors="pt").to(device)
+        outputs = self.model.generate(
+            input_ids=encoded["input_ids"],
+            attention_mask = encoded["attention_mask"]
+        )
+        decoded = [self.tokenizer.decode(o,skip_special_tokens=True) for o in outputs]
+        return decoded
+    #
+    # def __call__(self, prompt):
+    #     inputs = self.tokenizer(prompt, return_tensors="pt").to(device)
+    #     outputs = self.model.generate(
+    #         **inputs,
+    #         max_new_tokens=150,
+    #         temperature=0.9,
+    #         top_p =0.9,
+    #         repetition_penalty=1.2,
+    #         do_sample=True 
+    #     )
+    #
+    #     text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+    #     return text
+    #
+    #
 
 
-class Gemini:
-    def __init__(self, api_key, model="gemini-2.5-flash"):
-        self.client = genai.Client(api_key=api_key)
-        self.model = model
-
-    def __call__(self, prompt, max_new_tokens=256):
-        resp = self.client.models.generate_content(model=self.model, contents=prompt)
-        return resp.text
-
-
-gemini_key = "AIzaSyBRfwiNmkhOlwcX94E5eQ96xMLF5asdH8s"  # TODO: remove to env file
 # model = Gemini(gemini_key)
 # evaluator = Gemini(gemini_key, "gemini-1.5-pro")
 #
+# TODO: speed up through parralelization
 
 
-def generate_question_prompt(question):
+def clean_dataset(df):
+# TODO: remove rows with has_image to true 
+    return df.loc[df["has_image"] == True]
+
+# TODO: parralelize all ops below. Possibly with taichi.
+def generate_question_prompts(questions):
     context = question_context
-    res = f"<context>  {context} </context> Answer the following: <Question> {question} </Question>"
+    res = []
+    for question in questions: 
+        res.append(f"<context>  {context} </context> Answer the following: <Question> {question} </Question>")
     return res
 
 
-def generate_response_prompt(question, model_response, golden_response):
+def generate_response_prompts(questions, model_responses, golden_responses):
     context = evaluation_context
-    res = f"<context>{context}</context> <Question>{question}</Question> \n <GoldAnswer> {golden_response} </GoldAnswer> <ModelAnswer> {model_response} </ModelAnswer>"
+    res = []
+    for i in range(len(questions)):
+        res.append(f"<context>{context}</context> <Question>{questions[i]}</Question> \n <GoldAnswer> {golden_responses[i]} </GoldAnswer> <ModelAnswer> {model_responses[i]} </ModelAnswer>")
     return res
 
 
-def evaluate_response(evaluator, question, response, golden_response):
-    prompt = generate_response_prompt(question, response, golden_response)
-    response = evaluator(prompt)
-    return response
+def evaluate_responses(evaluator, questions, responses, golden_responses):
+    prompts = generate_response_prompts(questions, responses, golden_responses)
+    responses = []
+    for prompt in prompts:
+        print(len(responses))
+        res = evaluator(prompt)
+        responses.append(res)
+    return responses 
 
 
-def extract_eval(text):
-    pattern = r"<Evaluation>(.*?)</Evaluation>"
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()  # return content inside tags.
-    return None
+def extract_evals(texts):
+    res = []
+    for text in texts: 
+        pattern = r"<Evaluation>(.*?)</Evaluation>"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            res.append(match.group(1).strip())  # return content inside tags.
+        else:
+            res.append(None)
+    return res 
 
 
-def extract_reasoning(text):
-    pattern = r"<Reasoning>(.*?)</Reasoning>"
-    match = re.search(pattern, text, re.DOTALL)
-    if match:
-        return match.group(1)
-    return None
+def extract_reasonings(texts):
+    res = []
+    for text in texts:
+        pattern = r"<Reasoning>(.*?)</Reasoning>"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            res.append(match.group(1))
+        else: 
+            res.append(None)
+    return res 
 
+
+def log_evals(isCorrects,batch_num,total_batches):
+    count = sum(isCorrects) 
+    print(f"{batch_num}/{total_batches} complete with score {count}/{len(isCorrects)}")
+
+# TODO: make the models handle batching 
 
 df["model_response"] = None
 df["evaluation_reason"] = None
-df["eval"] = None
+df['eval'] = None 
 
-model = Gemini(api_key=gemini_key)
-evaluator = model
+df = clean_dataset(df)
 
-for i in range(num_rows):
+evaluator = Gemini()
+model = LocalModel("meta-llama/Llama-3.1-8B-Instruct")
+
+
+
+batch_size = 32
+num_rows = df.shape[0]
+num_batches = (num_rows + batch_size - 1) // batch_size 
+
+for i in range(0, num_rows, batch_size):
     try:
-        question = df.loc[i, "problem_statement"]
-        golden_response = df.loc[i, "golden_answer"]
+        j = min(i + batch_size, num_rows)  
+        questions = df.iloc[i:j]["problem_statement"].to_list()
+        golden_responses = df.iloc[i:j]["golden_answer"].to_list()
+        question_prompts = generate_question_prompts(questions)
+        answers = model(question_prompts)
+        evaluations = evaluate_responses(evaluator, questions, answers, golden_responses)
 
-        question_prompt = generate_question_prompt(question)
-        answer = model(question_prompt)
+        evals = extract_evals(evaluations)
+        reasonings = extract_reasonings(evaluations)
 
-        evaluation = evaluate_response(evaluator, question, answer, golden_response)
 
-        eval = extract_eval(evaluation)
-        reasoning = extract_reasoning(evaluation)
+        assert len(answers) == len(questions), f"{len(answers)} != {len(questions)}"
+        assert len(reasonings) == len(questions), f"{len(reasonings)} != {len(questions)}"
+        df.iloc[i:j,df.columns.get_loc("model_response")] = answers
+        df.iloc[i:j,df.columns.get_loc("evaluation_reason")] = reasonings
 
-        df.loc[i, "model_response"] = answer
-        df.loc[i, "evaluaton_reason"] = reasoning
-        df.loc[i, "eval"] = eval == "Correct"
+        isCorrects = list(map(lambda eval: eval == "Correct", evals))
+        df.iloc[i:j,df.columns.get_loc("eval")] = isCorrects  
 
-        print(f"{i + 1}/{num_rows} response was {eval}.")
+        log_evals(isCorrects,i // batch_size + 1, num_batches)
     except Exception as e:
-        print(e)
-        break
+        print("failed")
+        print(f"Batch {i}:{j} -> {len(questions)} questions")
+        print(f"answers={len(answers)}, reasonings={len(reasonings)}, evals={len(evals)}")
+        print(e) 
+        continue 
 
 
-df.to_csv("gemini_val.csv", index=False)
+df.to_csv("gemma_2b_it_val.csv", index=False)
+
