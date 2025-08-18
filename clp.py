@@ -6,6 +6,9 @@ import re
 
 CLP_PATH = "CLP.csv"
 
+def has_no_image(text):
+    # ensures the question is just text based and doesn't include images.  
+    return  not ("includegraphics" in text)
 def extract_question_with_solutions(file):
     with open(file, "r") as f:
         soup = TexSoup(f.read())
@@ -26,10 +29,10 @@ def extract_question_with_solutions(file):
                     break
                 if getattr(next_node, "name", None) == "question":
                     break  # no solution found before the next question
-
-            questions_with_solutions.append(
-                {"question": str(node), "solution": solution_text}
-            )
+            if has_no_image(str(node)) and has_no_image(solution_text):
+                questions_with_solutions.append(
+                    {"question": str(node), "solution": solution_text}
+                )
         i += 1
 
     return questions_with_solutions
@@ -44,7 +47,7 @@ categories = {
 }
 # ordered_categories = [cat for cat in book for book in categories.values()]
 
-def create_clp_datasaet():
+def create_clp_dataset():
     rows = []
 
     section = 0 
@@ -68,22 +71,22 @@ def create_clp_datasaet():
                 rows.append(
                     {
                         "file": section,
-                        "question": q["question"],
-                        "solution": q["solution"],
+                        "problem_statement": q["question"],
+                        "golden_answer": q["solution"],
                         "category": categories[book][chapter_num],
                         "book": book 
                     }
                 )
 
-    df = pd.DataFrame(rows, columns=["file", "question", "solution", "category","book"])
+    df = pd.DataFrame(rows, columns=["file", "problem_statement", "golden_answer", "category","book"])
     df.to_csv(CLP_PATH,index=False)
 
 
-def train_test_split(shuffle=False,frac=0.9):
+def train_test_split(df,shuffle=False,frac=0.9):
     train_list = []
     test_list = []
     for cat, group in df.groupby("category"):
-        train = group.sample(frac=0.8,random_state=42)
+        train = group.sample(frac=frac,random_state=42)
         test = group.drop(train.index)
         train_list.append(train)
         test_list.append(test)
@@ -96,10 +99,9 @@ def train_test_split(shuffle=False,frac=0.9):
     return train_df, test_df 
 
 
-df = pd.read_csv(CLP_PATH)
-train,test = train_test_split()
-
-
 def get_random_question():
     return df.loc[randint(0, len(df)), "question"]
 
+
+if __name__ == "__main__":
+    create_clp_dataset()
