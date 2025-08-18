@@ -30,3 +30,5 @@ nvitop is command of interest.
 # Observations:
 - gemma_2b_it got 11/900 on math benchmark pre-train
 - gemma_7b_it got 1/900! on math benchmark pre-train
+- gemma_2b_it got 3/148 on CLP test 
+- gemma_7b_it got 11/148 on CLP test

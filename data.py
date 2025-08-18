@@ -20,5 +20,8 @@ def log_random_response(df):
 
 
 
+df = pd.read_csv("gemma_7b_it_clp.csv")
+score = score(df)
 
-
+print(score)
+print(len(df))

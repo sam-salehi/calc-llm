@@ -9,6 +9,8 @@ import re
 import os 
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
+from transformers import Trainer, TrainingArguments 
+from datasets import Dataset 
 
 from prompts import evaluation_context, question_context
 from clp import CLP_PATH, train_test_split
@@ -62,6 +64,9 @@ class LocalModel:
             offload_folder="./offload",
             quantization_config=quant_config
         )
+    def tokenize(self,text):
+        return self.tokenizer(text)
+
     def __call__(self, prompts):
         results = []
         # Process in batches to limit GPU memory usage
@@ -104,6 +109,9 @@ def generate_evaluation_prompts(questions, model_responses, golden_responses):
         res.append(f"<context>{context}</context> <Question>{questions[i]}</Question> \n <GoldAnswer> {golden_responses[i]} </GoldAnswer> <ModelAnswer> {model_responses[i]} </ModelAnswer>")
     return res
 
+def generate_training_text(question,golden_response):
+   return f"<Question>{question}</Question><solution>{golden_response}</solution>" 
+    
 
 def evaluate_responses(evaluator, questions, responses, golden_responses):
     prompts = generate_evaluation_prompts(questions, responses, golden_responses)
@@ -193,6 +201,62 @@ def evaluate_model(df,model_id,save_path,batch_size):
 
     df.to_csv(save_path,index=False)
     #
+    #
+
+def train_model(training_data,hugging_face_id):
+    dataset = Dataset.from_pandas(training_data)
+
+    tokenizer = AutoTokenizer.from_pretrained(hugging_face_id)
+
+    # TODO: refactor with abovce code.
+
+
+
+    quant_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_threshold=6.0  
+    )
+
+
+    model = AutoModelForCausalLM.from_pretrained(
+        hugging_face_id,
+        torch_dtype="auto", 
+        device_map="auto",
+        offload_folder="./offload",
+        quantization_config=quant_config,
+    )
+
+
+    def tokenize_fn(row):
+        text = generate_training_text(row["problem_statement"],row["golden_answer"])
+        tokens = tokenizer(text)
+        return tokens
+    tokenized_data = dataset.map(tokenize_fn,batched=False)
+    
+    # should be handled differently
+    
+    training_args = TrainingArguments(
+        output_dir="./sft_model",
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=4,
+        learning_rate=2e-5,
+        num_train_epochs=3,
+        save_strategy="epoch",
+        fp16=True
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_data,
+        tokenizer=tokenizer
+    )
+
+    trainer.train()
+
+
+
+
 # df = pd.read_parquet("hf://datasets/toloka/u-math/data/test-00000-of-00001.parquet")
 # df = clean_dataset(df)
 # hugging_face_id = "google/gemma-7b-it"
@@ -204,8 +268,20 @@ GEMMA_7B_ID = "google/gemma-7B-it"
 
 if __name__ == "__main__":
     df = pd.read_csv(CLP_PATH)
-    _,test = train_test_split(df)
+    train,test = train_test_split(df)
     
     print("Testing set size: ",len(test))
     print("Testing set column names:", list(test))
-    evaluate_model(test,GEMMA_7B_ID,"gemma_7b_it_clp.csv",batch_size=2)
+
+    #evaluate_model(test,GEMMA_7B_ID,"gemma_7b_it_clp.csv",batch_size=2)
+    train_model(train,GEMMA_2B_ID)
+
+
+
+
+
+# Super vised learnign with training.
+# Epochs of entire data.
+# Epoch of each category.
+
+# should try fine tuning on one category and testng that single one first.
