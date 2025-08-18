@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 import time
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModel
-from transformers import BitsAndBytesConfig
 import torch
 from google import genai 
 import re
@@ -14,79 +12,13 @@ from datasets import Dataset
 
 from prompts import evaluation_context, question_context
 from clp import CLP_PATH, train_test_split
+from models import Gemini, LocalModel
 
 # umath dataset for evaluation 
 
-load_dotenv()
-google_api_key = os.getenv("google_api_key")
-device = "cuda"
-torch.cuda.empty_cache()
-torch.set_float32_matmul_precision("high")
 
 
 
-
-class Gemini:
-    def __init__(self, api_key=google_api_key):
-        self.client = genai.Client(api_key=api_key)
-
-    def _call_one(self, prompt):
-        response = self.client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[prompt]
-        )
-        return response.text.strip()
-
-    def __call__(self, prompts: list[str]):
-        with ThreadPoolExecutor() as executor:
-            results = list(executor.map(self._call_one, prompts))
-        return results
-
-
-
-
-
-
-class LocalModel:
-    def __init__(self, model_name, max_new_tokens=512):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.max_new_tokens = max_new_tokens
-
-        quant_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0  
-        )
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype="auto", # for gpu
-            device_map="auto",
-            offload_folder="./offload",
-            quantization_config=quant_config
-        )
-    def tokenize(self,text):
-        return self.tokenizer(text)
-
-    def __call__(self, prompts):
-        results = []
-        # Process in batches to limit GPU memory usage
-        encoded = self.tokenizer(prompts, padding=True, return_tensors="pt").to(self.model.device)
-        
-        output = self.model.generate(
-            input_ids=encoded["input_ids"],
-            attention_mask=encoded["attention_mask"],
-            max_new_tokens=self.max_new_tokens
-        )
-
-        for j in range(len(prompts)):
-            input_len = encoded["input_ids"][j].shape[0]
-            generated_tokens = output[j][input_len:]
-            decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-            results.append(decoded)
-        
-        torch.cuda.empty_cache()
-            
-        return results
 
 
 
@@ -277,7 +209,7 @@ if __name__ == "__main__":
     train_model(train,GEMMA_2B_ID)
 
 
-
+# https://huggingface.co/blog/gemma-peft
 
 
 # Super vised learnign with training.

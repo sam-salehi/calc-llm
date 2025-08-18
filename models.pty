@@ -1,0 +1,68 @@
+
+
+
+
+class Gemini:
+    def __init__(self, api_key=google_api_key):
+        self.client = genai.Client(api_key=api_key)
+
+    def _call_one(self, prompt):
+        response = self.client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[prompt]
+        )
+        return response.text.strip()
+
+    def __call__(self, prompts: list[str]):
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(self._call_one, prompts))
+        return results
+
+
+
+
+
+
+class LocalModel:
+    def __init__(self, model_name, max_new_tokens=512):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.max_new_tokens = max_new_tokens
+
+        quant_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0  
+        )
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype="auto", # for gpu
+            device_map="auto",
+            offload_folder="./offload",
+            quantization_config=quant_config
+        )
+    def tokenize(self,text):
+        return self.tokenizer(text)
+
+    def __call__(self, prompts):
+        results = []
+        # Process in batches to limit GPU memory usage
+        encoded = self.tokenizer(prompts, padding=True, return_tensors="pt").to(self.model.device)
+        
+        output = self.model.generate(
+            input_ids=encoded["input_ids"],
+            attention_mask=encoded["attention_mask"],
+            max_new_tokens=self.max_new_tokens
+        )
+
+        for j in range(len(prompts)):
+            input_len = encoded["input_ids"][j].shape[0]
+            generated_tokens = output[j][input_len:]
+            decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            results.append(decoded)
+        
+        torch.cuda.empty_cache()
+            
+        return results
+
+
+
