@@ -32,7 +32,7 @@ class Gemini:
 
 
 class LocalModel:
-    def __init__(self, model_name, max_new_tokens=128, batch_size=32):
+    def __init__(self, model_name, max_new_tokens=128, batch_size=8):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.max_new_tokens = max_new_tokens
         self.batch_size = batch_size
@@ -179,7 +179,8 @@ def evaluate_model(df,model_id,save_path):
     df.to_csv(save_path,index=False)
 
 
-df = pd.read_parquet("hf://datasets/toloka/u-math/data/test-00000-of-00001.parquet")
-df = clean_dataset(df)
-hugging_face_id = "google/gemma-2b-it"
-evaluate_model(df,hugging_face_id,hugging_face_id+".csv")
+if __name__ == "__main__":
+    df = pd.read_parquet("hf://datasets/toloka/u-math/data/test-00000-of-00001.parquet")
+    df = clean_dataset(df)
+    hugging_face_id = "google/gemma-7b-it"
+    evaluate_model(df,hugging_face_id,"gemma_7b_it.csv")
